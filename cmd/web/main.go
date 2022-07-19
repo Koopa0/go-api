@@ -1,70 +1,97 @@
 package main
 
 import (
+	"context"
+	"database/sql"
 	"flag"
 	"fmt"
-	"github.com/koopa0/go-api/internal/config"
-	"github.com/koopa0/go-api/internal/driver"
+	"github.com/koopa0/go-api/internal/models"
+	_ "github.com/lib/pq"
 	"log"
 	"net/http"
 	"os"
+	"time"
 )
 
-const portNumber = ":8080"
+const version = "1.0.0"
 
-var counts int64
-var app config.AppConfig
-
-func main() {
-
-	db, err := run()
-	if err != nil {
-		log.Fatal(err)
+type config struct {
+	port int
+	env  string
+	db   struct {
+		dsn string
 	}
-
-	defer db.SQL.Close()
-
-	srv := &http.Server{
-		Addr:    portNumber,
-		Handler: routes(&app),
-	}
-
-	err = srv.ListenAndServe()
-	if err != nil {
-		log.Fatal(err)
+	jwt struct {
+		secret string
 	}
 }
 
-func run() (*driver.DB, error) {
+type AppStatus struct {
+	Status      string `json:"status"`
+	Environment string `json:"environment"`
+	Version     string `json:"version"`
+}
 
-	dbHost := flag.String("dbhost", "localhost", "Database host")
-	dbName := flag.String("dbname", "jogroup", "Database name")
-	dbUser := flag.String("dbuser", "koopa", "Database user")
-	dbPass := flag.String("dbpass", "", "Database password")
-	dbPort := flag.String("dbport", "5432", "Database port")
-	dbSSL := flag.String("dbssl", "", "Database ssl setting (disable, prefer,require)")
+type application struct {
+	config config
+	logger *log.Logger
+	models models.Models
+}
 
+func main() {
+	var cfg config
+
+	flag.IntVar(&cfg.port, "port", 8080, "Server port to listen on")
+	flag.StringVar(&cfg.env, "env", "development", "Application environment(development|production")
+	flag.StringVar(&cfg.db.dsn, "dsn", "postgres://koopa@localhost/jogroup?sslmode=disable", "Postgres connection string")
+	flag.StringVar(&cfg.jwt.secret, "jwt_secret", "2dce505d96a53c5768052ee90f3df2055657518dad489160df9913f66042e160", "secret")
 	flag.Parse()
 
-	if *dbName == "" || *dbUser == "" {
-		fmt.Println("Missing required flags")
-		os.Exit(1)
+	//read jwt secret from env
+	//cfg.jwt.secret = os.Getenv("GO_MOVIES_JWT")
+
+	logger := log.New(os.Stdout, "", log.Ldate|log.Ltime)
+
+	db, err := openDB(cfg)
+	if err != nil {
+		logger.Fatal(err)
+	}
+	defer db.Close()
+
+	app := &application{
+		config: cfg,
+		logger: logger,
+		models: models.NewModels(db),
 	}
 
-	// connect to database
-	log.Println("Connecting to database...")
-	connectionString := fmt.Sprintf("host=%s port=%s dbname=%s user=%s password=%s sslmode=%s",
-		*dbHost, *dbPort, *dbName, *dbUser, *dbPass, *dbSSL)
-	db, err := driver.ConnectSQL(connectionString)
-	if err != nil {
-		log.Fatal("Cannot connect to database! Dying...")
+	srv := &http.Server{
+		Addr:              fmt.Sprintf(":%d", cfg.port),
+		Handler:           app.routes(),
+		IdleTimeout:       time.Minute,
+		ReadHeaderTimeout: 10 * time.Second,
+		WriteTimeout:      30 * time.Second,
 	}
-	log.Println("Connected to database!")
 
+	logger.Println("Starting Server on port", cfg.port)
+	err = srv.ListenAndServe()
 	if err != nil {
-		log.Fatal("cannot create template cache")
+		log.Println(err)
+	}
+
+}
+
+func openDB(cfg config) (*sql.DB, error) {
+	db, err := sql.Open("postgres", cfg.db.dsn)
+	if err != nil {
 		return nil, err
 	}
 
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	err = db.PingContext(ctx)
+	if err != nil {
+		return nil, err
+	}
 	return db, nil
 }
